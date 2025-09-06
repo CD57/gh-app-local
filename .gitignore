@@ -1,0 +1,21 @@
+node_modules/
+.env
+private-key.pem
+*.log
+dist/
+build/
+.DS_Store
+npm-debug.log*
+coverage/
+*.tgz
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
+*.bak
+# OS generated files
+Thumbs.db
+Desktop.ini
+# Optional: ignore test output
+/test-output/
