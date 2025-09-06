@@ -2,7 +2,7 @@
 
 A local Node.js application for interacting with the GitHub API using a GitHub App and private key authentication.
 
-![Compliance Result Example](./resources/images/Compliance-Result.png)
+![Compliance Result Example](./resources/images/compliance-result.png)
 
 ## Features
 
