@@ -4,7 +4,6 @@ import "dotenv/config";
 import { App as OctoApp } from "@octokit/app";
 import { Webhooks, createNodeMiddleware } from "@octokit/webhooks";
 
-// ---- env ----
 const {
   APP_ID,
   WEBHOOK_SECRET,
@@ -13,21 +12,47 @@ const {
 } = process.env;
 
 if (!APP_ID || !WEBHOOK_SECRET || !PRIVATE_KEY_PATH) {
-  console.error("Missing env. Ensure APP_ID, WEBHOOK_SECRET, PRIVATE_KEY_PATH are set in .env");
+  console.error("Missing env. Set APP_ID, WEBHOOK_SECRET, PRIVATE_KEY_PATH in .env");
   process.exit(1);
 }
 
 const privateKey = fs.readFileSync(PRIVATE_KEY_PATH, "utf8");
 
-// GitHub App auth helper: returns installation-scoped Octokit (core)
 async function getInstallationOctokit(installationId) {
   const app = new OctoApp({ appId: Number(APP_ID), privateKey });
-  const octokit = await app.getInstallationOctokit(Number(installationId));
-  return octokit; // has .request(), not .rest
+  return app.getInstallationOctokit(Number(installationId));
 }
 
-// Webhook handler
 const webhooks = new Webhooks({ secret: WEBHOOK_SECRET });
+
+async function fileExists(octokit, { owner, repo, path, ref }) {
+  try {
+    await octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+      owner,
+      repo,
+      path,
+      ref,
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    return true;
+  } catch (e) {
+    if (e.status === 404) return false;
+    throw e;
+  }
+}
+
+function renderTable(rows) {
+  const body = rows.map(r => `| ${r.name} | ${r.pass ? "✅ Present" : "❌ Missing"} | ${r.notes || ""} |`).join("\n");
+  return `| Check | Result | Notes |\n|---|---|---|\n${body}`;
+}
+
+function renderComment(rows) {
+  const missing = rows.filter(r => !r.pass).map(r => r.name);
+  const header = missing.length === 0
+    ? "✅ **Compliance PASSED** — All required files are present."
+    : `❌ **Compliance FAILED** — Missing: ${missing.join(", ")}`;
+  return `${header}\n\n${renderTable(rows)}`;
+}
 
 webhooks.on("pull_request", async ({ payload, id, name }) => {
   const action = payload.action;
@@ -38,17 +63,13 @@ webhooks.on("pull_request", async ({ payload, id, name }) => {
   const repo = payload.repository?.name;
   const headSha = payload.pull_request?.head?.sha;
   const prNumber = payload.number;
+  const headRef = payload.pull_request?.head?.ref;
 
-  console.log("PR event", { delivery: id, name, action, installationId, owner, repo, headSha });
-
-  if (!installationId || !owner || !repo || !headSha) {
-    console.error("Missing required fields from webhook payload");
-    return;
-  }
+  console.log("PR event", { delivery: id, name, action, installationId, owner, repo, headRef, headSha });
+  if (!installationId || !owner || !repo || !headSha || !prNumber) return;
 
   const octokit = await getInstallationOctokit(installationId);
 
-  // 1) Create an in-progress check (request API — no .rest)
   const { data: check } = await octokit.request(
     "POST /repos/{owner}/{repo}/check-runs",
     {
@@ -57,29 +78,25 @@ webhooks.on("pull_request", async ({ payload, id, name }) => {
       name: "Compliance",
       head_sha: headSha,
       status: "in_progress",
-      headers: { "Accept": "application/vnd.github+json" }
+      headers: { Accept: "application/vnd.github+json" },
     }
   );
 
-  console.log(`[checks] in_progress created id=${check.id} for ${owner}/${repo}@${headSha}`);
-
   try {
-    // 2) DEMO: simulate calling your Compliance Engine (replace this block)
-    await new Promise((r) => setTimeout(r, 2000));
-    const compliant = Math.random() > 0.5;
-    const checks = [
-      { name: "No Critical Vulns", pass: compliant, description: compliant ? "OK" : "Found 1 critical (demo)" },
-      { name: "License Policy", pass: true, description: "OK" },
-      { name: "Sonar Quality Gate", pass: true, description: "OK" },
-    ];
-    const passedCount = checks.filter(c => c.pass).length;
+    const targets = ["README.md", "CONTRIBUTING.md"];
+    const existence = await Promise.all(
+      targets.map(async (p) => ({
+        name: p,
+        pass: await fileExists(octokit, { owner, repo, path: p, ref: headSha }),
+        notes: "Checked at repo root",
+      }))
+    );
 
-    const rows = checks.map(c => `| ${c.name} | ${c.pass ? "✅" : "❌"} | ${c.description} |`).join("\n");
-    const table = `| Check | Result | Notes |\n|---|---|---|\n${rows}`;
-    const summary = `${passedCount} / ${checks.length} checks passed`;
-    const conclusion = compliant ? "success" : "failure";
+    const allPass = existence.every(x => x.pass);
+    const table = renderTable(existence);
+    const summary = `${existence.filter(x => x.pass).length} / ${existence.length} required files present`;
+    const conclusion = allPass ? "success" : "failure";
 
-    // 3) Complete the check
     await octokit.request(
       "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}",
       {
@@ -89,19 +106,28 @@ webhooks.on("pull_request", async ({ payload, id, name }) => {
         status: "completed",
         conclusion,
         output: {
-          title: `Compliance: ${compliant ? "PASSED" : "FAILED"}`,
+          title: `Compliance (files): ${allPass ? "PASSED" : "FAILED"}`,
           summary,
-          text: `### Checks\n${table}`,
+          text: `### Required files\n${table}`,
         },
-        headers: { "Accept": "application/vnd.github+json" }
+        headers: { Accept: "application/vnd.github+json" },
       }
     );
 
-    console.log(`[checks] completed ${conclusion} for ${owner}/${repo}@${headSha}`);
-  } catch (err) {
-    console.error("Error during compliance run:", err);
+    await octokit.request(
+      "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+      {
+        owner,
+        repo,
+        issue_number: prNumber,
+        body: renderComment(existence),
+        headers: { Accept: "application/vnd.github+json" },
+      }
+    );
 
-    // Ensure the check is marked as failure so you can see it in the PR
+    console.log(`[checks] completed ${conclusion} & commented for ${owner}/${repo}@${headSha}`);
+  } catch (err) {
+    console.error("Error during file checks:", err);
     try {
       await octokit.request(
         "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}",
@@ -112,20 +138,17 @@ webhooks.on("pull_request", async ({ payload, id, name }) => {
           status: "completed",
           conclusion: "failure",
           output: {
-            title: "Compliance: ERROR",
-            summary: "Compliance run failed",
-            text: "See server logs for details.",
+            title: "Compliance (files): ERROR",
+            summary: "Error while performing required-file checks",
+            text: "See app logs for details.",
           },
-          headers: { "Accept": "application/vnd.github+json" }
+          headers: { Accept: "application/vnd.github+json" },
         }
       );
-    } catch (e2) {
-      console.error("Also failed to update check run:", e2);
-    }
+    } catch {}
   }
 });
 
-// HTTP server for webhooks
 const server = http.createServer(createNodeMiddleware(webhooks, { path: "/events" }));
 server.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}/events`);
