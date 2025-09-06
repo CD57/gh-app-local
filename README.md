@@ -35,6 +35,12 @@ A local Node.js application for interacting with the GitHub API using a GitHub A
    - Place your GitHub App's private key as `private-key.pem` in the project root.
    - Optionally, create a `.env` file for environment variables (see below).
 
+4. **Run smee-client for webhook delivery:**
+
+   ```sh
+    npx smee-client --url https://smee.io/FZmvCkHNdfNBIA8a --target http://localhost:3000/events
+   ```
+
 ## Environment Variables
 
 Create a `.env` file in the root directory with the following variables:
